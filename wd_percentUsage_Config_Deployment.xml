@@ -13,6 +13,6 @@
       <!-- executor_memory: executor_memory -->
       <executor_memory>--executor-memory 20000m</executor_memory>
       <!-- executor_cores: executor_cores -->
-      <executor_cores>--executor-cores 16</executor_cores>
+      <executor_cores>--executor-cores 8</executor_cores>
     </spark>
 </parameters>

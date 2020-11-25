@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<parameters>
+    <!-- spark: spark2-submit parameters -->
+    <spark>
+      <!-- master: master -->
+      <master>--master yarn</master>
+      <!-- deploy_mode: deploy_mode -->
+      <deploy_mode>--deploy-mode client</deploy_mode>
+      <!-- num_executors: num_executors -->
+      <num_executors>--num-executors 100</num_executors>
+      <!-- driver_memory: driver_memory -->
+      <driver_memory>--driver-memory 20000m</driver_memory>
+      <!-- executor_memory: executor_memory -->
+      <executor_memory>--executor-memory 20000m</executor_memory>
+      <!-- executor_cores: executor_cores -->
+      <executor_cores>--executor-cores 16</executor_cores>
+    </spark>
+</parameters>

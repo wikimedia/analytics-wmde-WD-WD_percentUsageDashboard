@@ -1,54 +1,72 @@
 #!/usr/bin/env Rscript
 
 ### ---------------------------------------------------------------------------
-### --- Script: WD_percentUsage_PRODUCTION.R
-### --- Author: Goran S. Milovanovic, Data Analyst, WMDE
+### --- WD_percentUsage_PRODUCTION.R, v 0.0.1
+### --- script: WD_percentUsage_PRODUCTION.R
+### --- Author: Goran S. Milovanovic, Data Scientist, WMDE
 ### --- Developed under the contract between Goran Milovanovic PR Data Kolektiv
 ### --- and WMDE.
 ### --- Contact: goran.milovanovic_ext@wikimedia.de
+### --- July 2020.
 ### ---------------------------------------------------------------------------
 ### --- DESCRIPTION:
-### --- Fetch the WD usage data from goransm.wdcm_clients_wb_entity_usage table
-### --- (HiveQL, DataLake);
-### --- fetch the page tables from SQL to determine the pages in namespace = 0
-### --- that are not redirects;
-### --- compute the percent of articles that use WD for every WMF project.
+### --- Datasets Production for the Wikidata Usage and Coverage (WDUC) Project
 ### ---------------------------------------------------------------------------
-### --- RUN FROM: /home/goransm/wdUsagePerPage on stat1004 (currently)
-### --- on crontab as:
-### --- 0 0 * * * export USER=goransm && nice -10 Rscript 
-### --- /home/goransm/wdUsagePerPage/WD_percentUsage_PRODUCTION.R  >> 
-### --- /home/goransm/wdUsagePerPage/WD_percentUsage_PRODUCTION_LOG.log 2>&1
-### ---------------------------------------------------------------------------
-
 ### ---------------------------------------------------------------------------
 ### --- LICENSE:
 ### ---------------------------------------------------------------------------
 ### --- GPL v2
-### --- This file is part of Wikidata Concepts Monitor (WDCM)
+### --- This file is part of Wikidata Usage and Coverage (WDUC)
 ### ---
-### --- WDCM is free software: you can redistribute it and/or modify
+### --- WDUC is free software: you can redistribute it and/or modify
 ### --- it under the terms of the GNU General Public License as published by
 ### --- the Free Software Foundation, either version 2 of the License, or
 ### --- (at your option) any later version.
 ### ---
-### --- WDCM is distributed in the hope that it will be useful,
+### --- WDUC is distributed in the hope that it will be useful,
 ### --- but WITHOUT ANY WARRANTY; without even the implied warranty of
 ### --- MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 ### --- GNU General Public License for more details.
 ### ---
 ### --- You should have received a copy of the GNU General Public License
-### --- along with WDCM. If not, see <http://www.gnu.org/licenses/>.
-### ---------------------------------------------------------------------------
+### --- along with WDUC. If not, see <http://www.gnu.org/licenses/>.
 
 # - toReport
 print(paste0("Initiate on: ", Sys.time()))
 
 ### --- Setup
+library(XML)
 library(data.table)
 library(dplyr)
-filename <- 'wdUsagePerPage.tsv'
-dataDir <- '/home/goransm/wdUsagePerPage'
+
+### --- Read paramereters
+# - fPath: where the scripts is run from?
+fPath <- as.character(commandArgs(trailingOnly = FALSE)[4])
+fPath <- gsub("--file=", "", fPath, fixed = T)
+fPath <- unlist(strsplit(fPath, split = "/", fixed = T))
+fPath <- paste(
+  paste(fPath[1:length(fPath) - 1], collapse = "/"),
+  "/",
+  sep = "")
+params <- xmlParse(paste0(fPath, "wd_percentUsage_Config.xml"))
+params <- xmlToList(params)
+dataDir <- params$general$dataDir
+analyticsDir <- params$general$analyticsDir
+hdfsPath <- params$general$hdfsPath
+publicDir <- params$general$publicDir
+logDir <- params$general$logDir
+
+
+# - spark2-submit parameters:
+paramsDeploy <- xmlParse(paste0(fPath, "wd_percentUsage_Config_Deployment.xml"))
+paramsDeploy <- xmlToList(paramsDeploy)
+sparkMaster <- paramsDeploy$spark$master
+sparkDeployMode <- paramsDeploy$spark$deploy_mode
+sparkNumExecutors <- paramsDeploy$spark$num_executors
+sparkDriverMemory <- paramsDeploy$spark$driver_memory
+sparkExecutorMemory <- paramsDeploy$spark$executor_memory
+sparkExecutorCores <- paramsDeploy$spark$executor_cores
+sparkConfigDynamic <- paramsDeploy$spark$config
 
 ### --- Functions
 # - projectType() to determine project type
@@ -69,33 +87,112 @@ projectType <- function(projectName) {
 }
 
 # - toReport
-print("Fetch usage data from goransm.wdcm_clients_wb_entity_usage: HiveQL.")
+print("Fetch usage data from goransm.wdcm_clients_wb_entity_usage: PySpark")
 
-### --- Deliver counts from wdcm_clients_wb_entity_usage
-hiveQLquery <- "use goransm;
-          set hive.mapred.mode=nonstrict;
-          select distinct eu_page_id, wiki_db from wdcm_clients_wb_entity_usage 
-          where eu_aspect != 'S' ;
-"
-# - run query
-Rquery <- system(command = paste('/usr/local/bin/beeline --incremental=true --silent -e "',
-                                 hiveQLquery,
-                                 '" > ', dataDir,
-                                 "/", filename,
-                                 sep = ""),
-                 wait = TRUE)
+### ---------------------------------------------------------------------------
+### --- 1: Run Pyspark ETL
+### ---------------------------------------------------------------------------
 
-# - load resulting table
-setwd(dataDir)
-wdUsage <- fread(filename, sep = "\t", quote = "")
+# - toRuntime Log:
+print("Log: RUN WD_percentUsage_ETL.py")
+
+# - clean dataDir
+if (length(list.files(dataDir)) > 1) {
+  file.remove(paste0(dataDir, list.files(dataDir)))
+}
+# - Kerberos init
+system(command = 'sudo -u analytics-privatedata kerberos-run-command analytics-privatedata hdfs dfs -ls', 
+       wait = T)
+# - Run PySpark ETL
+system(command = paste0('sudo -u analytics-privatedata spark2-submit ', 
+                        sparkMaster, ' ',
+                        sparkDeployMode, ' ', 
+#                        sparkNumExecutors, ' ',
+                        sparkDriverMemory, ' ',
+                        sparkExecutorMemory, ' ',
+                        sparkExecutorCores, ' ',
+                        '--conf spark.dynamicAllocation.maxExecutors=100 --conf spark.executor.extraJavaOptions=-Dlog4j.configuration=/etc/spark2/defaults/log4j.properties --conf spark.driver.extraJavaOptions=-Dlog4j.configuration=/etc/spark2/defaults/log4j.properties ',
+                        paste0(fPath, 'WD_percentUsage_ETL.py')
+),
+wait = T)
+
+# - toRuntime Log:
+print("Log: RUN WD_percentUsage_ETL.py COMPLETED.")
+
+### ---------------------------------------------------------------------------
+### --- 2: Compose Usage and Coverage Datasets
+### ---------------------------------------------------------------------------
+
+### --- datasets: wdUsage
+# - copy splits from hdfs to local dataDir
+system(paste0('sudo -u analytics-privatedata kerberos-run-command analytics-privatedata hdfs dfs -ls ', 
+              hdfsPath, 'wdUsage > ', 
+              dataDir, 'files.txt'), 
+       wait = T)
+files <- read.table(paste0(dataDir, 'files.txt'), skip = 1)
+files <- as.character(files$V8)[2:length(as.character(files$V8))]
+file.remove(paste0(dataDir, 'files.txt'))
+for (i in 1:length(files)) {
+  system(paste0('sudo -u analytics-privatedata kerberos-run-command analytics-privatedata hdfs dfs -text ', 
+                files[i], ' > ',  
+                paste0(dataDir, "wdUsage", i, ".csv")), wait = T)
+}
+# - read splits: dataSet
+# - load
+lF <- list.files(dataDir)
+lF <- lF[grepl("wdUsage", lF)]
+wdUsage <- lapply(paste0(dataDir, lF), function(x) {fread(x,
+                                                          header = F,
+                                                          sep = ",")})
+# - collect
+wdUsage <- rbindlist(wdUsage)
+# - schema
+colnames(wdUsage) <- c('eu_page_id', 'wiki_db')
+# - set key: wiki_db
 setkey(wdUsage, wiki_db)
 
-### --- Iterate across page tables per project, fetch namespace 0 pages
-projectsTracking <- sort(unique(wdUsage$wiki_db))
-file.remove('currentProject.tsv')
+### --- datasets: wdSitelinks
+# - copy splits from hdfs to local dataDir
+system(paste0('sudo -u analytics-privatedata kerberos-run-command analytics-privatedata hdfs dfs -ls ', 
+              hdfsPath, 'wdSitelinks > ', 
+              dataDir, 'files.txt'), 
+       wait = T)
+files <- read.table(paste0(dataDir, 'files.txt'), skip = 1)
+files <- as.character(files$V8)[2:length(as.character(files$V8))]
+file.remove(paste0(dataDir, 'files.txt'))
+for (i in 1:length(files)) {
+  system(paste0('sudo -u analytics-privatedata kerberos-run-command analytics-privatedata hdfs dfs -text ', 
+                files[i], ' > ',  
+                paste0(dataDir, "wdSitelinks", i, ".csv")), wait = T)
+}
+# - read splits: dataSet
+# - load
+lF <- list.files(dataDir)
+lF <- lF[grepl("wdSitelinks", lF)]
+wdSitelinks <- lapply(paste0(dataDir, lF), function(x) {fread(x,
+                                                              header = F,
+                                                              sep = ",")})
+# - collect
+wdSitelinks <- rbindlist(wdSitelinks)
+# - schema
+colnames(wdSitelinks) <- c('eu_page_id', 'wiki_db')
+# - set key: wiki_db
+setkey(wdSitelinks, wiki_db)
+
+# - toReport
+print("READY: usage data from goransm.wdcm_clients_wb_entity_usage: PySpark.")
+
+### ---------------------------------------------------------------------------
+### --- 3: Iterate across page tables per project, fetch namespace 0 pages
+### ---------------------------------------------------------------------------
+
+# - projects tracked
+projectsTracking <- sort(unique(wdSitelinks$wiki_db))
 
 # - toReport
 print("SQL iterate across clients, fetch data, and produce the dataset.")
+
+# - iterate
 projectStats <- list()
 tStart <- Sys.time()
 c <- 0
@@ -103,55 +200,109 @@ for (i in 1:length(projectsTracking)) {
   pages <- tryCatch(
     {
       mySqlArgs <- 
-        '--defaults-file=/etc/mysql/conf.d/analytics-research-client.cnf -h analytics-store.eqiad.wmnet -A'
-      mySqlInput <- paste0('"USE ', 
-                           projectsTracking[i], 
-                           '; SELECT page_id FROM page WHERE (page_namespace = 0 AND page_is_redirect != 1);" > /home/goransm/wdUsagePerPage/currentProject.tsv')
+        paste0('/usr/local/bin/analytics-mysql ', projectsTracking[i], ' ') 
+      mySqlInput <- paste0('"SELECT page_id FROM page WHERE (page_namespace = 0 AND page_is_redirect != 1);" > ',
+                           dataDir, 'currentProject.tsv')
       # - command:
-      mySqlCommand <- paste0("mysql ", mySqlArgs, " -e ", mySqlInput, collapse = "")
+      mySqlCommand <- paste0(mySqlArgs, " -e ", mySqlInput, collapse = "")
       system(command = mySqlCommand, wait = TRUE)
-      fread('currentProject.tsv', sep = "\t", quote = "")
+      fread(paste0(dataDir, 'currentProject.tsv'), sep = "\t", quote = "")
     },
-    error = function(condtition) {
-      return(NULL)
+    error = function(condition) {
+      return(paste0("Error in /usr/local/bin/analytics-mysql ", projectsTracking[i]))
     },
-    warning = function(condtition) {
-      return(NULL)
+    warning = function(condition) {
+      return(paste0("Error in /usr/local/bin/analytics-mysql ", projectsTracking[i]))
     }
   )
-  file.remove('currentProject.tsv')
-  if (!is.null(pages)) {
+  if (sum(class(pages) == "character") == 0) {
     numPages <- length(unique(pages$page_id))
     localProject <- wdUsage %>%
       filter(wiki_db %in% projectsTracking[i])
-    if (dim(localProject)[1] > 0) {
+    localProjectSitelinks <- wdSitelinks %>%
+      filter(wiki_db %in% projectsTracking[i])
+    if (dim(localProjectSitelinks)[1] > 0) {
       c <- c + 1
       wdUsePages <- length(which(unique(pages$page_id) %in% localProject$eu_page_id))
+      wdSitelinksPages <- length(which(unique(pages$page_id) %in% localProjectSitelinks$eu_page_id))
       projectStats[[c]] <- data.frame(project = projectsTracking[i], 
                                       numPages = numPages,
                                       wdUsePages = wdUsePages,
+                                      wdSitelinksPages = wdSitelinksPages,
                                       percentWDuse = round(wdUsePages/numPages*100, 2),
+                                      percentWDsitelinks = round(wdSitelinksPages/numPages*100, 2),
                                       stringsAsFactors = F)
       # - toReport
+      print("-------------------------------------------------------------------------------")
+      print(paste0("Scanned project ", i, " out of: ", length(projectsTracking)))
       print(paste0("Project ", projectStats[[c]]$project, 
                    " has ", projectStats[[c]]$numPages, " pages, of which ", 
-                   projectStats[[c]]$wdUsePages, " make use of WD."))
+                   projectStats[[c]]$wdUsePages, " make use of WD, excluding Sitelinks."))
+      print(paste0("Project ", projectStats[[c]]$project, 
+                   " has ", projectStats[[c]]$numPages, " pages, of which ", 
+                   projectStats[[c]]$percentWDuse, "% make use of WD, excluding Sitelinks."))
+      print(paste0("Project ", projectStats[[c]]$project, 
+                   " has ", projectStats[[c]]$numPages, " pages, of which ", 
+                   projectStats[[c]]$wdSitelinksPages, " % make use of Sitelinks."))
+      print(paste0("Project ", projectStats[[c]]$project, 
+                   " has ", projectStats[[c]]$numPages, " pages, of which ", 
+                   projectStats[[c]]$percentWDsitelinks, " % make use of Sitelinks."))
+      print(paste0("Collected ", c, " projects out of ", length(projectsTracking), " so far. NEXT."))
     }
+  } else {
+    print(pages)
   }
 }
 # - bind
 projectStats <- rbindlist(projectStats)
+# - remove projects with no data:
+w <- which(projectStats$wdUsePages + projectStats$wdSitelinksPages == 0)
+if (length(w) > 0) {
+  projectStats <- projectStats[-w, ]
+}
+
 # - toReport
 print(paste0("Fetch and Compare took: ", tEnd <- Sys.time() - tStart, " total time."))
+
 # - add projectType
 projectStats$projectType <- projectType(projectStats$project)
 # - store
-write.csv(projectStats, "wdUsage_ProjectStatistics.csv")
+write.csv(projectStats, 
+          paste0(analyticsDir, "wdUsage_ProjectStatistics.csv"))
+
+### ---------------------------------------------------------------------------
+### --- 4: Publish results and Log
+### ---------------------------------------------------------------------------
+
+# - clean up
+file.remove(paste0(dataDir, list.files(dataDir)))
+
+### --- publish results:
 # - toReport
 print("Copy to production.")
 # - migrate to /srv/published-datasets
-system(command = 'cp /home/goransm/wdUsagePerPage/wdUsage_ProjectStatistics.csv /srv/published-datasets/wdUsagePercentArticle', 
+system(command = paste0('cp ', analyticsDir, 'wdUsage_ProjectStatistics.csv ', publicDir), 
        wait = T)
 # - toReport
 print(paste0("DONE: ", Sys.time()))
+
+### --- copy and clean up log files:
+# - conclusion
+print("DONE. Exiting.")
+# - copy the main log file to published for timestamp
+# - archive:
+lF <- list.files(fPath)
+lF <- lF[grepl('\\.log$', lF)]
+lapply(lF, function(x) {
+  system(command = 
+           paste0('cp ', fPath, x, ' ', logDir),
+         wait = T)
+})
+# - clean up
+file.remove(paste0(fPath, lF))
+
+
+
+
+
 
